@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+RUN apt-get update && apt-get install -y curl
+    
 # 1. Create user FIRST
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 

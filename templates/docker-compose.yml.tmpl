@@ -14,7 +14,7 @@ services:
     networks:
       - NETWORK_NAME
     depends_on:
-      service:
+      service_backend:
         condition: service_healthy
     restart: unless-stopped
 
