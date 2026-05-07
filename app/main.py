@@ -4,6 +4,23 @@ import random
 import threading
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
+import Request, Response
+# In your app, track these:
+# http_requests_total{method, path, status_code}
+# http_request_duration_seconds (histogram)
+# app_uptime_seconds
+# app_mode  (0=stable, 1=canary)
+# chaos_active (0=none, 1=slow, 2=error)
+
+# Use the prometheus_client library
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+
+REQUEST_COUNT = Counter('http_requests_total', 'Total requests', ['method', 'path', 'status_code'])
+REQUEST_LATENCY = Histogram('http_request_duration_seconds', 'Latency', buckets=[.005,.01,.025,.05,.1,.25,.5,1,2.5,5,10])
+UPTIME = Gauge('app_uptime_seconds', 'Uptime')
+APP_MODE = Gauge('app_mode', 'Mode (0=stable 1=canary)')
+CHAOS_ACTIVE = Gauge('chaos_active', 'Chaos state')
+
 
 app = Flask(__name__)
 
@@ -36,6 +53,25 @@ def apply_chaos():
             if random.random() < _chaos["rate"]:
                 return True, 0
     return False, 0
+
+
+@app.before_request
+def before_request():
+    request.start_time = time.time()
+
+@app.after_request
+def after_request(response):
+    if request.path == "/metrics":
+        return response
+    
+    latency = time.time() - request.start_time
+    REQUEST_LATENCY.observe(latency)
+    REQUEST_COUNT.labels(
+        method=request.method,
+        path=request.path,
+        status_code=response.status_code
+    ).inc()
+    return response
 
 
 @app.route("/")
@@ -98,6 +134,21 @@ def chaos():
     else:
         return jsonify({"error": "Invalid chaos mode. Use: slow | error | recover"}), 400
 
+@app.get("/metrics")
+def metrics():
+    UPTIME.set(time.time() - START_TIME)
+    APP_MODE.set(1 if get_mode() == "canary" else 0)
+    
+    with _chaos_lock:
+        chaos = _chaos["mode"]
+        if chaos == "slow":
+            CHAOS_ACTIVE.set(1)
+        elif chaos == "error":
+            CHAOS_ACTIVE.set(2)
+        else:
+            CHAOS_ACTIVE.set(0)
+            
+    return Response(generate_latest(), media_type="text/plain")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3000)

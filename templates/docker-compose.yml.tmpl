@@ -42,6 +42,24 @@ services:
       retries: 12
       start_period: 5s
     restart: unless-stopped
+    
+  policy_engine:
+    image: POLICY_IMAGE
+    container_name: policy_engine
+    ports:
+      - "127.0.0.1:POLICY_PORT:POLICY_PORT"
+    command:
+      - "run"
+      - "--server"  
+      - "--addr=0.0.0.0:POLICY_PORT"
+      - "/POLICY_DIR"
+    volumes:
+      - ./POLICY_DIR:/POLICY_DIR:ro
+    networks:
+      - NETWORK_NAME
+    restart: unless-stopped
+    # Exposed ONLY to localhost (host CLI) — isolated from public Nginx
+    
 
 networks:
   NETWORK_NAME:

@@ -52,6 +52,7 @@ cmd_init() {
   local svc_image svc_port svc_mode svc_version
   local nginx_image nginx_port proxy_timeout
   local net_name net_driver
+  local policy_image policy_port policy_dir
 
   svc_image=$(mf '.services.image')
   svc_port=$(mf '.services.port')
@@ -62,6 +63,9 @@ cmd_init() {
   proxy_timeout=$(mf '.nginx.proxy_timeout')
   net_name=$(mf '.network.name')
   net_driver=$(mf '.network.driver_type')
+  policy_image=$(mf '.policy_engine.image')
+  policy_port=$(mf '.policy_engine.port')
+  policy_dir=$(mf '.policy_engine.policy_dir')
 
   # Derive the short image name (strip tag) for error pages
   local svc_image_name
@@ -89,6 +93,9 @@ cmd_init() {
     -e "s|SERVICE_VERSION|${svc_version}|g" \
     -e "s|NETWORK_NAME|${net_name}|g" \
     -e "s|NETWORK_DRIVER|${net_driver}|g" \
+    -e "s|POLICY_IMAGE|${policy_image}|g" \
+    -e "s|POLICY_PORT|${policy_port}|g" \
+    -e "s|POLICY_DIR|${policy_dir}|g" \
     "$COMPOSE_TMPL" > "$COMPOSE_FILE"
 
   log "init" "Done. Generated files are ready."
@@ -122,6 +129,9 @@ cmd_validate() {
     '.nginx.proxy_timeout'
     '.network.name'
     '.network.driver_type'
+    '.policy_engine.image'
+    '.policy_engine.port'
+    '.policy_engine.policy_dir'
   )
   local missing=false
   for field in "${required_fields[@]}"; do
@@ -189,6 +199,9 @@ cmd_deploy() {
 
   require_generated
 
+  log "deploy" "Running pre-deploy infrastructure check..."
+  cmd_check_infrastructure || die "Pre-deploy infrastructure check failed."
+
   log "deploy" "Starting stack with docker compose..."
   docker compose -f "$COMPOSE_FILE" up -d
 
@@ -229,6 +242,11 @@ cmd_promote() {
     die "Usage: ./swiftdeploy promote <stable|canary>"
   fi
 
+  if [[ "$new_mode" == "stable" ]]; then
+      log "promote" "Running pre-promote canary health check..."
+      cmd_check_canary || die "Pre-promote check failed. Canary is unhealthy."
+  fi
+
   log "promote" "Updating $MANIFEST mode → $new_mode"
   yq e -i ".services.mode = \"${new_mode}\"" "$MANIFEST"
 
@@ -263,6 +281,333 @@ cmd_promote() {
 # ──────────────────────────────────────────────
 # teardown — stop and remove the stack
 # ──────────────────────────────────────────────
+
+# Pre-deploy check
+cmd_check_infrastructure() {
+    local disk_free cpu_load mem_free
+    disk_free=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+    cpu_load=$(awk '{print $1}' /proc/loadavg)
+    mem_free=$(free -g | awk '/^Mem/{print $4}')
+
+    local input
+    input=$(cat <<EOF
+{
+  "input": {
+    "disk_free_gb": $disk_free,
+    "cpu_load": $cpu_load,
+    "mem_free_gb": $mem_free,
+    "check_type": "pre-deploy"
+  }
+}
+EOF
+)
+    local opa_port
+    opa_port=$(mf '.policy_engine.port')
+
+    local result
+    result=$(curl -sf -X POST \
+        -H "Content-Type: application/json" \
+        -d "$input" \
+        "http://localhost:${opa_port}/v1/data/infrastructure" 2>/dev/null) || {
+        log "policy" "⚠️  OPA unavailable — cannot enforce infrastructure policy" >&2
+        return 1
+    }
+
+    local allowed reasons
+    allowed=$(echo "$result" | jq -r '.result.allow // false')
+    reasons=$(echo "$result" | jq -r '.result.deny_reasons[]? // empty')
+
+    if [[ "$allowed" == "true" ]]; then
+        log "policy" "✅ Infrastructure policy: PASS"
+    else
+        log "policy" "❌ Infrastructure policy: BLOCKED"
+        echo "$reasons" | while read -r r; do
+            log "policy" "   → $r"
+        done
+        return 1
+    fi
+}
+
+
+cmd_check_canary() {
+    local nginx_port
+    nginx_port=$(mf '.nginx.port')
+    
+    local metrics
+    metrics=$(curl -sf "http://localhost:${nginx_port}/metrics" 2>/dev/null) || {
+        log "policy" "⚠️  Could not scrape metrics for pre-promote check."
+        return 0
+    }
+    
+    local input
+    input=$(python3 -c '
+import sys, json
+
+lines = sys.stdin.read().split("\n")
+total = 0.0
+errors = 0.0
+buckets = []
+count = 0
+
+for line in lines:
+    if line.startswith("http_requests_total{"):
+        try:
+            val = float(line.split(" ")[-1])
+            total += val
+            if "status_code=\"5" in line:
+                errors += val
+        except: pass
+    elif line.startswith("http_request_duration_seconds_bucket{"):
+        try:
+            le_str = line.split("le=\"")[1].split("\"")[0]
+            val = float(line.split(" ")[-1])
+            if le_str != "+Inf":
+                buckets.append((float(le_str), val))
+            else:
+                count = val
+        except: pass
+
+buckets.sort()
+error_rate = errors / total if total > 0 else 0.0
+
+p99_latency_ms = 0
+if count > 0:
+    target = count * 0.99
+    for le, bval in buckets:
+        if bval >= target:
+            p99_latency_ms = int(le * 1000)
+            break
+    if p99_latency_ms == 0 and buckets:
+        p99_latency_ms = int(buckets[-1][0] * 1000)
+
+print(json.dumps({
+    "input": {
+        "error_rate": error_rate,
+        "p99_latency_ms": p99_latency_ms,
+        "check_type": "pre-promote"
+    }
+}))
+' <<< "$metrics")
+
+    local opa_port
+    opa_port=$(mf '.policy_engine.port')
+
+    local result
+    result=$(curl -sf -X POST \
+        -H "Content-Type: application/json" \
+        -d "$input" \
+        "http://localhost:${opa_port}/v1/data/canary" 2>/dev/null) || {
+        log "policy" "⚠️  OPA unavailable — cannot enforce canary policy" >&2
+        return 1
+    }
+
+    local allowed reasons
+    allowed=$(echo "$result" | jq -r '.result.allow // false')
+    reasons=$(echo "$result" | jq -r '.result.deny_reasons[]? // empty')
+
+    if [[ "$allowed" == "true" ]]; then
+        log "policy" "✅ Canary policy: PASS"
+    else
+        log "policy" "❌ Canary policy: BLOCKED"
+        echo "$reasons" | while read -r r; do
+            log "policy" "   → $r"
+        done
+        return 1
+    fi
+}
+
+cmd_status() {
+    local nginx_port opa_port
+    nginx_port=$(mf '.nginx.port')
+    opa_port=$(mf '.policy_engine.port')
+    
+    echo "Starting status dashboard. Press Ctrl+C to stop."
+    
+    local prev_reqs=0
+    local prev_time=$(date +%s)
+    
+    while true; do
+        clear
+        echo "═══════════════════════════════════════"
+        echo "  SwiftDeploy Status — $(date)"
+        echo "═══════════════════════════════════════"
+        
+        local metrics
+        metrics=$(curl -sf "http://localhost:${nginx_port}/metrics" 2>/dev/null || echo "")
+        
+        if [[ -z "$metrics" ]]; then
+            echo "Service unreachable."
+            sleep 5
+            continue
+        fi
+        
+        local parsed
+        parsed=$(python3 -c '
+import sys, json
+
+lines = sys.stdin.read().split("\n")
+total = 0.0
+errors = 0.0
+uptime = 0.0
+mode = 0.0
+chaos = 0.0
+buckets = []
+count = 0
+
+for line in lines:
+    if line.startswith("http_requests_total{"):
+        try:
+            val = float(line.split(" ")[-1])
+            total += val
+            if "status_code=\"5" in line:
+                errors += val
+        except: pass
+    elif line.startswith("http_request_duration_seconds_bucket{"):
+        try:
+            le_str = line.split("le=\"")[1].split("\"")[0]
+            val = float(line.split(" ")[-1])
+            if le_str != "+Inf":
+                buckets.append((float(le_str), val))
+            else:
+                count = val
+        except: pass
+    elif line.startswith("app_uptime_seconds "):
+        try: uptime = float(line.split(" ")[-1])
+        except: pass
+    elif line.startswith("app_mode "):
+        try: mode = float(line.split(" ")[-1])
+        except: pass
+    elif line.startswith("chaos_active "):
+        try: chaos = float(line.split(" ")[-1])
+        except: pass
+
+buckets.sort()
+error_rate = errors / total if total > 0 else 0.0
+
+p99_latency_ms = 0
+if count > 0:
+    target = count * 0.99
+    for le, bval in buckets:
+        if bval >= target:
+            p99_latency_ms = int(le * 1000)
+            break
+    if p99_latency_ms == 0 and buckets:
+        p99_latency_ms = int(buckets[-1][0] * 1000)
+
+print(json.dumps({
+    "total_reqs": total,
+    "error_rate": error_rate,
+    "p99_latency_ms": p99_latency_ms,
+    "uptime": uptime,
+    "mode": mode,
+    "chaos": chaos
+}))
+' <<< "$metrics")
+
+        local total_reqs=$(echo "$parsed" | jq -r '.total_reqs')
+        local error_rate=$(echo "$parsed" | jq -r '.error_rate')
+        local p99=$(echo "$parsed" | jq -r '.p99_latency_ms')
+        local uptime=$(echo "$parsed" | jq -r '.uptime')
+        local mode_val=$(echo "$parsed" | jq -r '.mode')
+        local chaos_val=$(echo "$parsed" | jq -r '.chaos')
+        
+        local mode_str="stable"
+        [[ "$mode_val" == "1.0" ]] && mode_str="canary"
+        local chaos_str="none"
+        [[ "$chaos_val" == "1.0" ]] && chaos_str="slow"
+        [[ "$chaos_val" == "2.0" ]] && chaos_str="error"
+        
+        local cur_time=$(date +%s)
+        local time_diff=$((cur_time - prev_time))
+        [[ $time_diff -eq 0 ]] && time_diff=1
+        
+        local reqs_diff=$(echo "$total_reqs - $prev_reqs" | bc -l)
+        local rps=$(echo "scale=2; $reqs_diff / $time_diff" | bc -l)
+        
+        prev_reqs=$total_reqs
+        prev_time=$cur_time
+        
+        echo "Uptime:   ${uptime}s"
+        echo "Mode:     ${mode_str}"
+        echo "Chaos:    ${chaos_str}"
+        echo "Req/s:    ${rps}"
+        echo "P99 Lat:  ${p99}ms"
+        echo "Errors:   $(echo "scale=2; $error_rate * 100" | bc -l)%"
+        echo ""
+        echo "--- Policy Compliance ---"
+        
+        local disk_free=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+        local cpu_load=$(awk '{print $1}' /proc/loadavg)
+        local mem_free=$(free -g | awk '/^Mem/{print $4}')
+        
+        local infra_res=$(curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"input\": {\"disk_free_gb\": $disk_free, \"cpu_load\": $cpu_load, \"mem_free_gb\": $mem_free}}" \
+            "http://localhost:${opa_port}/v1/data/infrastructure" 2>/dev/null)
+        
+        if [[ -n "$infra_res" ]]; then
+            local infra_allow=$(echo "$infra_res" | jq -r '.result.allow // false')
+            if [[ "$infra_allow" == "true" ]]; then
+                echo "✅ Infrastructure Policy: PASS"
+            else
+                echo "❌ Infrastructure Policy: FAIL"
+            fi
+        else
+            echo "⚠️  Infrastructure Policy: OPA UNREACHABLE"
+        fi
+        
+        local canary_res=$(curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"input\": {\"error_rate\": $error_rate, \"p99_latency_ms\": $p99}}" \
+            "http://localhost:${opa_port}/v1/data/canary" 2>/dev/null)
+            
+        if [[ -n "$canary_res" ]]; then
+            local canary_allow=$(echo "$canary_res" | jq -r '.result.allow // false')
+            if [[ "$canary_allow" == "true" ]]; then
+                echo "✅ Canary Policy: PASS"
+            else
+                echo "❌ Canary Policy: FAIL"
+            fi
+        else
+            echo "⚠️  Canary Policy: OPA UNREACHABLE"
+        fi
+        
+        local timestamp=$(date -u +%FT%TZ)
+        local entry="{\"timestamp\":\"$timestamp\",\"mode\":\"$mode_str\",\"chaos\":\"$chaos_str\",\"rps\":$rps,\"p99_ms\":$p99,\"error_rate\":$error_rate}"
+        echo "$entry" >> history.jsonl
+        
+        sleep 5
+    done
+}
+
+cmd_audit() {
+    log "audit" "Generating audit_report.md..."
+    
+    if [[ ! -f "history.jsonl" ]]; then
+        die "No history.jsonl found. Run 'swiftdeploy status' first."
+    fi
+    
+    cat > audit_report.md << 'EOF'
+# SwiftDeploy Audit Report
+
+## Timeline
+
+| Timestamp | Mode | Chaos Active | Req/s | P99 (ms) | Error Rate |
+|-----------|------|--------------|-------|----------|------------|
+EOF
+
+    jq -r '"| \(.timestamp) | \(.mode) | \(.chaos) | \(.rps) | \(.p99_ms) | \((.error_rate * 100 * 100 | round) / 100)% |"' history.jsonl >> audit_report.md
+    
+    cat >> audit_report.md << 'EOF'
+
+## Violations
+
+*Note: In this basic implementation, violations are recorded if error rate exceeds 1% or P99 exceeds 500ms based on historical records.*
+
+EOF
+
+    jq -r 'if .error_rate > 0.01 or .p99_ms > 500 then "- \(.timestamp): Violation detected! Error rate: \((.error_rate * 100 * 100 | round) / 100)%, P99: \(.p99_ms)ms (Mode: \(.mode), Chaos: \(.chaos))" else empty end' history.jsonl >> audit_report.md
+    
+    log "audit" "✅ audit_report.md generated successfully."
+}
 
 cmd_teardown() {
   require_cmd docker
@@ -302,6 +647,8 @@ case "$SUBCOMMAND" in
   validate)  cmd_validate  "$@" ;;
   deploy)    cmd_deploy    "$@" ;;
   promote)   cmd_promote   "$@" ;;
+  status)    cmd_status    "$@" ;;
+  audit)     cmd_audit     "$@" ;;
   teardown)  cmd_teardown  "$@" ;;
   "")
     echo "SwiftDeploy CLI"
@@ -313,6 +660,8 @@ case "$SUBCOMMAND" in
     echo "  validate          Run 5 pre-flight checks"
     echo "  deploy            Init + bring up stack + health poll"
     echo "  promote <mode>    Switch mode (stable|canary) with rolling restart"
+    echo "  status            Live dashboard of metrics and policy compliance"
+    echo "  audit             Generate audit_report.md from history.jsonl"
     echo "  teardown [--clean] Stop and remove all containers/volumes"
     exit 0
     ;;

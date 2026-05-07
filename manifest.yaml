@@ -9,6 +9,17 @@ nginx:
   port: 8080
   proxy_timeout: 30s
 
+policy_engine:
+  image: openpolicyagent/opa:latest
+  port: 8181
+  policy_dir: policies
+  # Policies are evaluated for each of the domains listed below:
+  # The command expects exactly one domain in this list to be evaluated. The domain should be added as a json object in the prompt
+  policy_domains:
+    - infrastructure
+    - canary
+    - deployment
+
 network:
   name: swiftdeploy-net
   driver_type: bridge
