@@ -1,22 +1,22 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y curl
-    
-# 1. Create user FIRST
+
+# Create user
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# 2. Create directories AFTER user exists
+# Create home dir
 RUN mkdir -p /home/appuser && chown -R appuser:appuser /home/appuser
 
 WORKDIR /app
 
-# 3. Copy app
+# Copy app
 COPY app/main.py .
 
-# 4. Install dependencies
-RUN pip install --no-cache-dir flask gunicorn
+# Install dependencies
+RUN pip install --no-cache-dir flask gunicorn prometheus_client
 
-# 5. Set ownership AFTER files exist
+# Set ownership
 RUN chown -R appuser:appuser /app
 
 USER appuser
