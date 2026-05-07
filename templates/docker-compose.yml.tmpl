@@ -18,7 +18,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  service:
+  service_backend:
     image: SERVICE_IMAGE
     container_name: service_backend
     expose:

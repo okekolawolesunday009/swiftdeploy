@@ -68,7 +68,7 @@ cmd_init() {
   svc_image_name="${svc_image%%:*}"
 
   # Derive container service name from compose convention (service)
-  local svc_container_name="service"
+  local svc_container_name="service_backend"
 
   log "init" "Generating $NGINX_CONF from template..."
   sed \

@@ -1,16 +1,20 @@
 FROM python:3.12-slim
 
-# Create non-root user
+# 1. Create user FIRST
 RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# 2. Create directories AFTER user exists
+RUN mkdir -p /home/appuser && chown -R appuser:appuser /home/appuser
 
 WORKDIR /app
 
+# 3. Copy app
 COPY app/main.py .
 
-# Install dependencies
+# 4. Install dependencies
 RUN pip install --no-cache-dir flask gunicorn
 
-# Change ownership
+# 5. Set ownership AFTER files exist
 RUN chown -R appuser:appuser /app
 
 USER appuser
