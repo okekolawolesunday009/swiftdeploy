@@ -199,10 +199,17 @@ cmd_deploy() {
 
   require_generated
 
-  log "deploy" "Running pre-deploy infrastructure check..."
-  cmd_check_infrastructure || die "Pre-deploy infrastructure check failed."
+  log "deploy" "Starting OPA to evaluate pre-deploy policies..."
+  docker compose -f "$COMPOSE_FILE" up -d policy_engine
+  sleep 2
 
-  log "deploy" "Starting stack with docker compose..."
+  log "deploy" "Running pre-deploy infrastructure check..."
+  if ! cmd_check_infrastructure; then
+      docker compose -f "$COMPOSE_FILE" down 2>/dev/null
+      die "Pre-deploy infrastructure check failed."
+  fi
+
+  log "deploy" "Starting remaining stack with docker compose..."
   docker compose -f "$COMPOSE_FILE" up -d
 
   local nginx_port
