@@ -11,14 +11,15 @@ http {
         server SERVICE_NAME:SERVICE_PORT;
     }
 
+    # Custom log format
+    log_format swiftdeploy '$time_iso8601 | $status | $request_time s | $upstream_addr | $request';
+
     server {
-        listen NGINX_PORT;
+        listen 80;
         server_name _;
 
         access_log /var/log/nginx/access.log combined;
 
-        # Custom log format
-        log_format swiftdeploy '$time_iso8601 | $status | ${request_time}s | $upstream_addr | $request';
         access_log /var/log/nginx/access.log swiftdeploy;
 
         # Proxy timeouts

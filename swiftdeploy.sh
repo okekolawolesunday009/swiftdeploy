@@ -100,6 +100,7 @@ cmd_init() {
 
 cmd_validate() {
   require_cmd yq
+  require_cmd nginx
   local all_pass=true
 
   # Check 1: manifest.yaml exists and is valid YAML
