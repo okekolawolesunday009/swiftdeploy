@@ -1,5 +1,5 @@
 services:
-  image: swift-deploy-1-node:latest
+  image: swift-deploy-1-python:latest
   port: 3000
   mode: stable           # "stable" or "canary"
   version: "1.0.0"

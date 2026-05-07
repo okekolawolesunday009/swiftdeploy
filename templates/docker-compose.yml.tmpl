@@ -5,6 +5,7 @@ services:
 
   nginx:
     image: NGINX_IMAGE
+    container_name: nginx_proxy
     ports:
       - "NGINX_PORT:NGINX_PORT"
     volumes:
@@ -19,6 +20,7 @@ services:
 
   service:
     image: SERVICE_IMAGE
+    container_name: service_backend
     expose:
       - "SERVICE_PORT"
     environment:

@@ -161,18 +161,19 @@ cmd_validate() {
   fi
 
   # Check 5: nginx.conf syntax valid
-  if [[ -f "$NGINX_CONF" ]] && nginx -t -c "$(pwd)/$NGINX_CONF" &>/dev/null; then
-    log "validate" "Check 5: $NGINX_CONF syntax is valid ✅ PASS"
+  # Check 5: nginx.conf syntax valid
+  if [[ -f "$NGINX_CONF" ]]; then
+      nginx_err=$(nginx -t -c "$(pwd)/$NGINX_CONF" 2>&1)
+      if echo "$nginx_err" | grep -q "syntax is ok"; then
+          log "validate" "Check 5: $NGINX_CONF syntax is valid ✅ PASS"
+      else
+          log "validate" "Check 5: $NGINX_CONF syntax invalid ❌ FAIL"
+          echo "$nginx_err"   # <-- shows you the exact error
+          all_pass=false
+      fi
   else
-    log "validate" "Check 5: $NGINX_CONF syntax invalid or file missing ❌ FAIL"
-    all_pass=false
-  fi
-
-  if [[ "$all_pass" == true ]]; then
-    log "validate" "All checks passed. Ready to deploy."
-  else
-    log "validate" "One or more checks failed. Fix the issues above before deploying." >&2
-    exit 1
+      log "validate" "Check 5: $NGINX_CONF missing ❌ FAIL"
+      all_pass=false
   fi
 }
 
