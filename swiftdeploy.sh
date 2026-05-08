@@ -263,7 +263,7 @@ cmd_promote() {
   require_generated
 
   log "promote" "Restarting service container..."
-  docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate service
+  docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate service_backend
 
   local nginx_port
   nginx_port=$(mf '.nginx.port')
